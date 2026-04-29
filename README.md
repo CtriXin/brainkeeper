@@ -104,10 +104,18 @@ cd ~/.local/share/brainkeeper && git pull && npm install --production
 curl -fsSL https://raw.githubusercontent.com/CtriXin/brainkeeper/main/install.sh | bash -s -- --update
 ```
 
+The CLI checks npm for a newer release at most once every 24 hours and prints a
+short update hint when a newer `brainkeeper` version is available. Disable it
+with:
+
+```bash
+export BRAINKEEPER_NO_UPDATE_CHECK=1
+```
+
 ### Install a specific tag or branch
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CtriXin/brainkeeper/main/install.sh | bash -s -- --ref v2.4.0
+curl -fsSL https://raw.githubusercontent.com/CtriXin/brainkeeper/main/install.sh | bash -s -- --ref v2.4.1
 curl -fsSL https://raw.githubusercontent.com/CtriXin/brainkeeper/main/install.sh | bash -s -- --ref main
 ```
 

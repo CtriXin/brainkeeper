@@ -14,7 +14,7 @@ import { loadIndex } from './storage.js';
 import { handleLearn, handleRecall, handleList, handleBootstrap, handleCheckpoint, handleFragment, handleLinkIssue, handleSyncIssue, handleThreads, handleBoard, handleCheck, handleDigest, handleSearch, } from './handlers.js';
 import { initSession, formatStatus, resetState, } from './token-monitor.js';
 const index = loadIndex();
-const server = new Server({ name: 'brainkeeper', version: '2.4.0' }, { capabilities: { tools: {}, resources: {} } });
+const server = new Server({ name: 'brainkeeper', version: '2.4.1' }, { capabilities: { tools: {}, resources: {} } });
 // ── 懒加载状态 ──
 let extended = false;
 // ── 工具定义 ──

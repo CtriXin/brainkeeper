@@ -24,6 +24,7 @@ import { QUADRANT_KEYS, QUADRANT_LABELS } from './types.js';
 import { execSync } from 'child_process';
 import { resolve } from 'path';
 import { cmdContinuity } from './continuity.js';
+import { maybePrintUpdateNotice, printVersion } from './update-check.js';
 const args = process.argv.slice(2);
 const command = args[0];
 // ── ANSI 颜色 ──
@@ -67,6 +68,7 @@ ${c.bold('Overview')}
   bk                              全景（各显示 5 条）
   bk all                          全景（显示全部）
   bk "query"                      统一搜索 recipe / thread / fragment
+  bk --version                    显示当前版本
 
 ${c.bold('Recipes')}
   bk rcp [all]                    列出 recipe
@@ -660,6 +662,7 @@ function tryDirectShow(id) {
     return false;
 }
 // ── 路由 ──
+const shouldCheckUpdates = !new Set(['help', '--help', '-h', 'version', '--version', '-v']).has(command || '');
 switch (command) {
     case 'recipe':
     case 'rcp':
@@ -677,6 +680,11 @@ switch (command) {
     case 'continuity':
     case 'c':
         await cmdContinuity(args.slice(1));
+        break;
+    case 'version':
+    case '--version':
+    case '-v':
+        printVersion();
         break;
     case 'help':
     case '--help':
@@ -697,3 +705,5 @@ switch (command) {
         break;
     }
 }
+if (shouldCheckUpdates)
+    await maybePrintUpdateNotice();

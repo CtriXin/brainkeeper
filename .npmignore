@@ -1,0 +1,17 @@
+# BrainKeeper publishes through package.json "files" allowlist.
+# Keep this denylist as a second guardrail for accidental publish changes.
+.ai/
+.claude/
+.data/
+brain/
+docs/
+src/
+test/
+node_modules/
+coverage/
+*.tgz
+*.log
+.mcp.json
+.DS_Store
+.vscode/
+.idea/

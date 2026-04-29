@@ -30,7 +30,7 @@ import {
 const index = loadIndex();
 
 const server = new Server(
-  { name: 'brainkeeper', version: '2.4.0' },
+  { name: 'brainkeeper', version: '2.4.1' },
   { capabilities: { tools: {}, resources: {} } }
 );
 

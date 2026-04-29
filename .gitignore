@@ -11,9 +11,9 @@ brain/
 # Claude Code 项目配置
 .claude/
 
-# 本地 agent release notes
-.ai/agent-release-notes.md
-.ai/SESSION_INDEX.md
+# 本地 agent/runtime 产物
+.ai/
+*.tgz
 
 # IDE
 .vscode/
