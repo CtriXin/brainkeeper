@@ -1,5 +1,5 @@
 export type ContinuitySource = 'codex' | 'claude';
-export type ContinuityPreset = 'compact' | 'standard' | 'full';
+export type ContinuityPreset = 'compact' | 'standard' | 'extended' | 'full';
 export type ContinuityOutput = 'clipboard' | 'file';
 export interface ContinuitySession {
     id: string;
@@ -8,6 +8,8 @@ export interface ContinuitySession {
     branch?: string;
     model?: string;
     summary?: string;
+    initialPrompt?: string;
+    latestPrompt?: string;
     rawPath: string;
     updatedAtMs: number;
     createdAtMs: number;
@@ -24,6 +26,7 @@ export interface ContinuityOptions {
     limit?: number;
     git?: boolean;
     all?: boolean;
+    reverse?: boolean;
     refresh?: boolean;
     cache?: boolean;
 }
@@ -31,6 +34,7 @@ export declare function discoverContinuitySessions(opts?: {
     cwd?: string;
     limit?: number;
     all?: boolean;
+    reverse?: boolean;
     refresh?: boolean;
     cache?: boolean;
 }): ContinuitySession[];

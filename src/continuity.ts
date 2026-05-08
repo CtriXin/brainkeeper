@@ -10,14 +10,14 @@ import {
   writeFileSync,
   lstatSync,
 } from 'fs';
-import { basename, dirname, join, resolve } from 'path';
+import { basename, dirname, join, relative, resolve } from 'path';
 import { execSync, spawnSync } from 'child_process';
 import { emitKeypressEvents } from 'readline';
 import { stdin as input, stdout as output } from 'process';
 import { getRealHome } from './env.js';
 
 export type ContinuitySource = 'codex' | 'claude';
-export type ContinuityPreset = 'compact' | 'standard' | 'full';
+export type ContinuityPreset = 'compact' | 'standard' | 'extended' | 'full';
 export type ContinuityOutput = 'clipboard' | 'file';
 
 export interface ContinuitySession {
@@ -27,6 +27,8 @@ export interface ContinuitySession {
   branch?: string;
   model?: string;
   summary?: string;
+  initialPrompt?: string;
+  latestPrompt?: string;
   rawPath: string;
   updatedAtMs: number;
   createdAtMs: number;
@@ -67,6 +69,7 @@ export interface ContinuityOptions {
   limit?: number;
   git?: boolean;
   all?: boolean;
+  reverse?: boolean;
   refresh?: boolean;
   cache?: boolean;
 }
@@ -98,25 +101,28 @@ interface ContinuityDiscoveryCache {
 }
 
 const DEFAULT_LIMIT = 40;
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 3;
 const RECENT_HOT_DAYS = 3;
 const HEAD_SCAN_BYTES = 4 * 1024 * 1024;
 const TAIL_SCAN_BYTES = 16 * 1024 * 1024;
-const CONTINUITY_PACK_HEADER = '# BrainKeeper Continuity Pack';
+const CONTINUITY_PACK_HEADER = '# BrainKeeper Continuity Restore Card';
+const OLD_CONTINUITY_PACK_HEADER = '# BrainKeeper Continuity Pack';
 const LEGACY_CONTINUITY_PACK_HEADER = '# MindKeeper Continuity Pack';
 const CONTINUITY_PACK_OMITTED = '[previous BrainKeeper Continuity Pack omitted]';
 const CONTINUITY_PACK_END_MARKER = '- 不要重复已经完成的探索；从最近未解决点继续。';
 
 const CLIPBOARD_PRESET_LIMITS: Record<ContinuityPreset, PresetLimits> = {
-  compact: { summaries: 4, summaryChars: 420, messages: 4, tools: 6, messageChars: 700, resultChars: 0, includeToolResults: false },
-  standard: { summaries: 8, summaryChars: 700, messages: 8, tools: 12, messageChars: 1200, resultChars: 0, includeToolResults: false },
-  full: { summaries: 20, summaryChars: 1200, messages: 16, tools: 40, messageChars: 5000, resultChars: 1200, includeToolResults: true },
+  compact: { summaries: 4, summaryChars: 420, messages: 4, tools: 6, messageChars: 420, resultChars: 0, includeToolResults: false },
+  standard: { summaries: 8, summaryChars: 700, messages: 8, tools: 10, messageChars: 700, resultChars: 0, includeToolResults: false },
+  extended: { summaries: 12, summaryChars: 900, messages: 12, tools: 16, messageChars: 1200, resultChars: 0, includeToolResults: false },
+  full: { summaries: 20, summaryChars: 1200, messages: 16, tools: 40, messageChars: 3000, resultChars: 1200, includeToolResults: true },
 };
 
 const FILE_PRESET_LIMITS: Record<ContinuityPreset, PresetLimits> = {
-  compact: { summaries: 10, summaryChars: 900, messages: 12, tools: 20, messageChars: 1800, resultChars: 0, includeToolResults: false },
-  standard: { summaries: 30, summaryChars: 1200, messages: 24, tools: 50, messageChars: 4000, resultChars: 0, includeToolResults: false },
-  full: { summaries: 100, summaryChars: 2400, messages: 80, tools: 160, messageChars: 20000, resultChars: 8000, includeToolResults: true },
+  compact: { summaries: 6, summaryChars: 700, messages: 8, tools: 8, messageChars: 520, resultChars: 0, includeToolResults: false },
+  standard: { summaries: 10, summaryChars: 900, messages: 12, tools: 12, messageChars: 900, resultChars: 0, includeToolResults: false },
+  extended: { summaries: 20, summaryChars: 1200, messages: 24, tools: 24, messageChars: 1800, resultChars: 0, includeToolResults: false },
+  full: { summaries: 40, summaryChars: 1600, messages: 40, tools: 80, messageChars: 6000, resultChars: 4000, includeToolResults: true },
 };
 
 function uniq<T>(items: T[]): T[] {
@@ -333,7 +339,7 @@ function cleanText(text: string): string {
 }
 
 function stripEmbeddedContinuityPack(text: string): string {
-  const start = [CONTINUITY_PACK_HEADER, LEGACY_CONTINUITY_PACK_HEADER]
+  const start = [CONTINUITY_PACK_HEADER, OLD_CONTINUITY_PACK_HEADER, LEGACY_CONTINUITY_PACK_HEADER]
     .map(header => text.indexOf(header))
     .filter(index => index >= 0)
     .sort((a, b) => a - b)[0] ?? -1;
@@ -429,6 +435,19 @@ function parseCodexSession(path: string, envHome: string): ContinuitySession | u
     }
     if (cwd && firstUser) break;
   }
+  let latestUser = '';
+  for (const entry of jsonLines(readTailText(path))) {
+    const msg = record(entry);
+    if (!msg) continue;
+    const payload = record(msg.payload);
+    let candidate = '';
+    if (msg.type === 'event_msg' && payload?.type === 'user_message') {
+      candidate = stringValue(payload.message) || '';
+    } else if (msg.type === 'response_item' && payload?.type === 'message' && payload.role === 'user') {
+      candidate = extractContent(payload.content);
+    }
+    if (isRealUserContent(candidate)) latestUser = candidate;
+  }
 
   return {
     id: parsed.id,
@@ -436,7 +455,9 @@ function parseCodexSession(path: string, envHome: string): ContinuitySession | u
     cwd,
     branch: branch || undefined,
     model: model || undefined,
-    summary: firstUser ? oneLine(firstUser, 180) : undefined,
+    summary: (latestUser || firstUser) ? oneLine(latestUser || firstUser, 180) : undefined,
+    initialPrompt: firstUser ? oneLine(firstUser, 180) : undefined,
+    latestPrompt: latestUser ? oneLine(latestUser, 180) : undefined,
     rawPath: path,
     createdAtMs,
     updatedAtMs: st.mtimeMs,
@@ -459,6 +480,7 @@ function parseClaudeSession(path: string, envHome: string): ContinuitySession | 
   let branch = '';
   let model = '';
   let firstUser = '';
+  let latestUser = '';
   let latestSummary = '';
   let firstTs = 0;
   let lastTs = 0;
@@ -498,6 +520,7 @@ function parseClaudeSession(path: string, envHome: string): ContinuitySession | 
     if (msg.type === 'system' && msg.subtype === 'away_summary' && content) {
       latestSummary = content;
     } else if (msg.type === 'user' && isRealUserContent(content)) {
+      latestUser = content;
       latestSummary = content;
     }
   }
@@ -509,6 +532,8 @@ function parseClaudeSession(path: string, envHome: string): ContinuitySession | 
     branch: branch || undefined,
     model: model || undefined,
     summary: (latestSummary || firstUser) ? oneLine(latestSummary || firstUser, 180) : undefined,
+    initialPrompt: firstUser ? oneLine(firstUser, 180) : undefined,
+    latestPrompt: latestUser ? oneLine(latestUser, 180) : undefined,
     rawPath: path,
     createdAtMs: firstTs || st.birthtimeMs,
     updatedAtMs: lastTs || st.mtimeMs,
@@ -538,7 +563,7 @@ function isRealUserContent(text: string): boolean {
   if (!cleaned) return false;
   if (cleaned === CONTINUITY_PACK_OMITTED) return false;
   if (cleaned.startsWith('CAVEMAN MODE ACTIVE')) return false;
-  if (cleaned.startsWith(CONTINUITY_PACK_HEADER)) return false;
+  if ([CONTINUITY_PACK_HEADER, OLD_CONTINUITY_PACK_HEADER, LEGACY_CONTINUITY_PACK_HEADER].some(header => cleaned.startsWith(header))) return false;
   if (cleaned.startsWith('# AGENTS.md instructions')) return false;
   if (cleaned.startsWith('<environment_context>')) return false;
   if (cleaned.startsWith('<permissions instructions>')) return false;
@@ -753,7 +778,7 @@ function hotRefreshCache(cache: ContinuityDiscoveryCache, realHome: string, envH
   };
 }
 
-function scopeContinuitySessions(sessions: ContinuitySession[], opts: { cwd?: string; limit?: number; all?: boolean }): ContinuitySession[] {
+function scopeContinuitySessions(sessions: ContinuitySession[], opts: { cwd?: string; limit?: number; all?: boolean; reverse?: boolean }): ContinuitySession[] {
   const cwd = opts.cwd ? realpathish(opts.cwd) : '';
   const currentProject = cwd ? projectScope(cwd) : '';
   const scoped = opts.all || !cwd
@@ -766,10 +791,11 @@ function scopeContinuitySessions(sessions: ContinuitySession[], opts: { cwd?: st
     return b.updatedAtMs - a.updatedAtMs;
   });
 
-  return sorted.slice(0, opts.limit ?? DEFAULT_LIMIT);
+  const limited = sorted.slice(0, opts.limit ?? DEFAULT_LIMIT);
+  return opts.reverse ? limited.reverse() : limited;
 }
 
-export function discoverContinuitySessions(opts: { cwd?: string; limit?: number; all?: boolean; refresh?: boolean; cache?: boolean } = {}): ContinuitySession[] {
+export function discoverContinuitySessions(opts: { cwd?: string; limit?: number; all?: boolean; reverse?: boolean; refresh?: boolean; cache?: boolean } = {}): ContinuitySession[] {
   const realHome = getRealHome();
   const envHome = process.env.HOME || '';
   const useCache = opts.cache !== false;
@@ -828,23 +854,83 @@ function summarizeTool(name: string, args: Record<string, unknown>): string {
 function collectFilesFromTool(name: string, args: Record<string, unknown>, out: Set<string>): void {
   for (const key of ['file_path', 'path', 'filePath', 'workdir']) {
     const value = args[key];
-    if (typeof value === 'string' && looksLikePath(value)) out.add(value);
+    if (typeof value === 'string' && looksLikePath(value)) rememberFile(value, out);
   }
   const cmd = typeof args.cmd === 'string' ? args.cmd : '';
   if (cmd) {
     for (const match of cmd.matchAll(/(?:^|\s)(?:sed\s+-i|tee|cat\s+>|printf\s+.*?>|mv|cp)\s+.*?\s(["']?)([./~][^"'\s;|&]+)\1/g)) {
-      out.add(match[2]);
+      rememberFile(match[2], out);
     }
   }
   if (name.includes('apply_patch') && typeof args.patch === 'string') {
     for (const match of args.patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
-      out.add(match[1].trim());
+      rememberFile(match[1].trim(), out);
     }
   }
 }
 
+function collectFilesFromText(text: string, out: Set<string>): void {
+  const pattern = /(?:^|[\s`"'])((?:~|\.{1,2}|\/)[A-Za-z0-9._~@%+=:/-]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9._~@%+=:/-]+\.[A-Za-z0-9]{1,12})(?=$|[\s`"',).:;])/g;
+  for (const match of text.matchAll(pattern)) {
+    const candidate = match[1].replace(/[),.;:]+$/u, '');
+    if (looksLikePath(candidate)) rememberFile(candidate, out);
+  }
+}
+
+function rememberFile(value: string, out: Set<string>): void {
+  const path = value.trim().replace(/[),.;:]+$/u, '');
+  if (path.includes(',')) {
+    for (const part of path.split(',')) rememberFile(part, out);
+    return;
+  }
+  if (!path || path.length > 240 || path.startsWith('http')) return;
+  if (/^\.[A-Za-z0-9]+$/u.test(path)) return;
+  if (path === '/dev/null' || path === '.git' || path.endsWith('/.git')) return;
+  if (path.includes('...') || path.includes('<') || path.includes('>')) return;
+  out.add(path);
+}
+
 function looksLikePath(value: string): boolean {
+  if (/^https?:\/\//iu.test(value)) return false;
   return value.includes('/') || /\.[A-Za-z0-9]{1,8}$/.test(value);
+}
+
+function isImportantTool(tool: ToolActivity): boolean {
+  if (tool.name.includes('apply_patch')) return true;
+  const summary = tool.summary.toLowerCase();
+  if (/\bgit\s+(status|log|show|add|commit|restore|checkout|merge|rebase)\b/u.test(summary)) return true;
+  if (/\bgit\s+diff\s+(?:--check|--stat|--cached\s+--stat)\b/u.test(summary)) return true;
+  if (/\b(pnpm|npm|yarn|npx)\s+(build|test|run|exec|tsc|vitest)\b/u.test(summary)) return true;
+  if (/\b(vitest|pytest|cargo\s+test|go\s+test|tsc)\b/u.test(summary)) return true;
+  if (/\b(mkdir|touch|mv|cp|rm|tee)\b/u.test(summary)) return true;
+  if (/\bsed\s+-i\b/u.test(summary) || />\s*[./~\w-]/u.test(summary)) return true;
+  if (/\b(commit|handoff|checkpoint|distill)\b/u.test(summary)) return true;
+  return false;
+}
+
+function selectToolActivity(tools: ToolActivity[], preset: ContinuityPreset, limit: number): ToolActivity[] {
+  const deduped = dedupeTools(tools);
+  if (preset === 'full') return deduped.slice(-limit);
+  const important = deduped.filter(isImportantTool);
+  return (important.length > 0 ? important : deduped).slice(-limit);
+}
+
+function discoverDesignAssetIndexes(cwd: string): string[] {
+  if (!cwd || !existsSync(cwd)) return [];
+  const root = join(cwd, '.ai', 'design-assets');
+  return walkFiles(root, file => basename(file) === 'README.md', 4)
+    .map(file => relative(cwd, file))
+    .slice(0, 20);
+}
+
+function designAssetSignals(files: string[], cwd: string): { indexes: string[]; repoAssets: string[]; generatedSources: string[] } {
+  const indexes = uniq([
+    ...files.filter(file => file.includes('.ai/design-assets/') && basename(file) === 'README.md'),
+    ...discoverDesignAssetIndexes(cwd),
+  ]);
+  const repoAssets = uniq(files.filter(file => file.includes('.ai/design-assets/') && !indexes.includes(file)));
+  const generatedSources = uniq(files.filter(file => file.includes('/generated_images/') || file.includes('/.codex/generated_images/')));
+  return { indexes, repoAssets, generatedSources };
 }
 
 function extractCodexContext(session: ContinuitySession, preset: ContinuityPreset, output: ContinuityOutput): ExtractedContext {
@@ -864,7 +950,10 @@ function extractCodexContext(session: ContinuitySession, preset: ContinuityPrese
       const role = payload.role === 'assistant' ? 'assistant' : payload.role === 'system' ? 'system' : 'user';
       const content = cleanText(extractContent(payload.content));
       const phase = stringValue(payload.phase);
-      if (!isConversationNoise(role, content, phase)) messages.push({ role, content });
+      if (!isConversationNoise(role, content, phase)) {
+        messages.push({ role, content });
+        collectFilesFromText(content, files);
+      }
     } else if (msg.type === 'response_item' && payload.type === 'function_call') {
       const name = stringValue(payload.name) || 'tool';
       const args = parseJsonArgs(payload.arguments);
@@ -886,7 +975,7 @@ function extractCodexContext(session: ContinuitySession, preset: ContinuityPrese
   return {
     summaries: [],
     messages: dedupeMessages(messages).slice(-limits.messages),
-    tools: dedupeTools(tools).slice(-limits.tools),
+    tools: selectToolActivity(tools, preset, limits.tools),
     files: [...files].slice(0, 80),
   };
 }
@@ -918,13 +1007,16 @@ function extractClaudeContext(session: ContinuitySession, preset: ContinuityPres
       tools.push({ name, summary: summarizeTool(name, args) });
       collectFilesFromTool(name, args, files);
     }
-    if (!isConversationNoise(role, content)) messages.push({ role, content });
+    if (!isConversationNoise(role, content)) {
+      messages.push({ role, content });
+      collectFilesFromText(content, files);
+    }
   }
 
   return {
     summaries: dedupeSummaries(summaries).slice(-limits.summaries),
     messages: dedupeMessages(messages).slice(-limits.messages),
-    tools: dedupeTools(tools).slice(-limits.tools),
+    tools: selectToolActivity(tools, preset, limits.tools),
     files: [...files].slice(0, 80),
   };
 }
@@ -1205,6 +1297,7 @@ function presetText(preset: ContinuityPreset | undefined): string {
   const p = preset || 'standard';
   if (p === 'full') return paint('yellow', p);
   if (p === 'compact') return paint('green', p);
+  if (p === 'extended') return paint('blue', p);
   return paint('cyan', p);
 }
 
@@ -1224,7 +1317,8 @@ function formatSessionColumns(session: ContinuitySession): string {
   const age = formatAge(session.updatedAtMs);
   const repo = extractRepoName(session.cwd);
   const summaryWidth = Math.max(24, terminalWidth() - 74);
-  const summary = clipVisible(oneLine(session.summary || '(no summary)', 220), summaryWidth);
+  const signal = session.latestPrompt || session.summary || session.initialPrompt || '(no summary)';
+  const summary = clipVisible(oneLine(signal, 220), summaryWidth);
   return [
     sourceBadge(session.source),
     padVisible(paint('gray', age), 6),
@@ -1255,34 +1349,83 @@ function renderContinuityMarkdown(
 ): string {
   const limits = limitsFor(preset, output);
   const lines: string[] = [
-    '# BrainKeeper Continuity Pack',
+    CONTINUITY_PACK_HEADER,
     '',
-    '你正在接手一个已有 coding session。先读取这份上下文，然后继续推进，不要从零开始。',
+    '这是启动卡，不是 raw transcript。先恢复方向，再按 live repo 状态继续。',
     '',
-    '## Session',
+    '## Load First',
     '',
-    `- source: \`${session.source}\``,
-    `- session id: \`${session.id}\``,
-    `- output: \`${output}\``,
+    '- `AGENTS.md` / `RTK.md`（如果存在）',
+    '- `git status --short`',
+    `- raw transcript: \`${session.rawPath}\``,
+    '',
+    '## Mission',
+    '',
     `- cwd: \`${session.cwd || process.cwd()}\``,
   ];
+  if (session.summary) lines.push(`- latest user signal: ${truncate(cleanText(session.summary), limits.summaryChars)}`);
+  if (session.initialPrompt && session.initialPrompt !== session.summary) {
+    lines.push(`- initial user signal: ${truncate(cleanText(session.initialPrompt), limits.summaryChars)}`);
+  }
+  lines.push('');
+
+  lines.push(
+    '## Current Snapshot',
+    '',
+    `- generated: ${formatTime(Date.now())}`,
+    `- source: \`${session.source}\``,
+    `- session id: \`${session.id}\``,
+    `- output: \`${output}\` / preset: \`${preset}\``,
+    `- last active: ${formatTime(session.updatedAtMs)}`,
+    `- origin: \`${session.origin}\``,
+  );
   if (session.branch) lines.push(`- branch: \`${session.branch}\``);
   if (session.model) lines.push(`- model: \`${session.model}\``);
-  lines.push(
-    `- last active: ${formatTime(session.updatedAtMs)}`,
-    `- raw transcript: \`${session.rawPath}\``,
-    `- origin: \`${session.origin}\``,
-    '',
-  );
-
-  if (session.summary) {
-    lines.push('## Current Goal', '', session.summary, '');
-  }
+  lines.push('');
 
   const git = includeGit ? gitState(session.cwd || process.cwd(), preset) : [];
   if (git.length > 0) {
-    lines.push('## Git State', '', ...git, '');
+    lines.push(
+      '## Git State Snapshot',
+      '',
+      '- snapshot only; live `git status --short` is source of truth.',
+      ...git,
+      '',
+    );
   }
+
+  lines.push(
+    '## Hard Blocks',
+    '',
+    '- 不要 touch / stage / revert 用户已有 dirty changes。',
+    '- 如果 handoff 定义 protected globs，任何 live dirty match 都视为禁动。',
+    '- Git snapshot 可能过期；先看 live status 再行动。',
+    '',
+  );
+
+  const files = uniq(context.files).filter(Boolean);
+  if (files.length > 0) {
+    lines.push('## Files Mentioned Or Touched', '');
+    for (const file of files.slice(0, 30)) lines.push(`- \`${file.replace(/`/g, '\\`')}\``);
+    lines.push('');
+  }
+
+  const designAssets = designAssetSignals(files, session.cwd || process.cwd());
+  lines.push('## Design Assets', '');
+  if (designAssets.indexes.length > 0) {
+    lines.push(`- source of truth: \`${designAssets.indexes[0].replace(/`/g, '\\`')}\``);
+  } else if (designAssets.repoAssets.length > 0 || designAssets.generatedSources.length > 0) {
+    lines.push('- source of truth: not found; create/update `.ai/design-assets/<task>/README.md` before implementation.');
+  } else {
+    lines.push('- No generated design assets detected in captured context.');
+  }
+  for (const path of designAssets.repoAssets.slice(0, 8)) {
+    lines.push(`- repo asset signal: \`${path.replace(/`/g, '\\`')}\``);
+  }
+  for (const path of designAssets.generatedSources.slice(0, 8)) {
+    lines.push(`- generated source (unclassified): \`${path.replace(/`/g, '\\`')}\``);
+  }
+  lines.push('- Do not infer final image/version from transcript alone; use the asset README when present.', '');
 
   if (context.summaries.length > 0) {
     lines.push('## Session Summaries', '');
@@ -1295,17 +1438,15 @@ function renderContinuityMarkdown(
   }
 
   if (context.messages.length > 0) {
-    lines.push('## Recent Conversation', '');
-    for (const message of context.messages) {
-      lines.push(`### ${message.role}`);
-      lines.push('');
-      lines.push(truncate(cleanText(message.content), limits.messageChars));
-      lines.push('');
+    lines.push('## Key Conversation Signals (newest first)', '');
+    for (const message of [...context.messages].reverse()) {
+      lines.push(`- ${message.role}: ${oneLine(message.content, limits.messageChars)}`);
     }
+    lines.push('');
   }
 
   if (context.tools.length > 0) {
-    lines.push('## Tool Activity', '');
+    lines.push('## Tool Activity Snapshot', '');
     for (const tool of context.tools) {
       lines.push(`- **${tool.name}**: ${tool.summary}`);
       if (limits.includeToolResults && tool.result) {
@@ -1318,20 +1459,14 @@ function renderContinuityMarkdown(
     lines.push('');
   }
 
-  const files = uniq(context.files).filter(Boolean);
-  if (files.length > 0) {
-    lines.push('## Files Mentioned Or Touched', '');
-    for (const file of files) lines.push(`- \`${file.replace(/`/g, '\\`')}\``);
-    lines.push('');
-  }
-
   lines.push(
-    '## Continue Instructions',
+    '## Next Action',
     '',
-    '- 保持当前 repo 和任务方向。',
-    '- 先检查 `git status` 和关键文件，再继续动手。',
-    '- 如果上下文不足，优先读取 raw transcript 路径或相关文件。',
-    '- 不要重复已经完成的探索；从最近未解决点继续。',
+    '- 先读 handoff / plan 文件（如果 Files 或 raw transcript 指向）。',
+    '- 如果任务用到生图，先读/补 `.ai/design-assets/<task>/README.md`，不要靠 transcript 猜最终图。',
+    '- 再跑 `git status --short`，按 live dirty/protected 状态定 write scope。',
+    '- 只实现当前 mission；不要把 raw transcript 当待办清单全量重放。',
+    '- 上下文不足时才打开 raw transcript。',
     '',
   );
 
@@ -1393,6 +1528,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--launch') warn('已忽略 --launch：MMS/CLI 自动启动还没实现。');
     else if (arg === '--list' || arg === '-l') opts.list = true;
     else if (arg === '--all') opts.all = true;
+    else if (arg === '--reverse') opts.reverse = true;
     else if (arg === '--refresh') opts.refresh = true;
     else if (arg === '--no-cache') opts.cache = false;
     else if (arg === '--to') {
@@ -1424,6 +1560,7 @@ function resolveOutput(opts: ParsedArgs): ContinuityOutput {
 function normalizePreset(value: string | undefined): ContinuityPreset {
   const v = String(value || '').trim().toLowerCase();
   if (v === 'compact' || v === 'minimal') return 'compact';
+  if (v === 'extended' || v === 'extend' || v === 'long' || v === 'large') return 'extended';
   if (v === 'full' || v === 'verbose') return 'full';
   return 'standard';
 }
@@ -1458,7 +1595,7 @@ async function chooseSession(
     'Step 1/3 · Session',
     choices,
     0,
-    searchAll ? 'all projects' : `current dir: ${process.cwd()}`,
+    `${searchAll ? 'all projects' : `current dir: ${process.cwd()}`} · ${opts.reverse ? 'oldest first' : 'newest first'} · signal = latest prompt`,
   );
 }
 
@@ -1481,17 +1618,19 @@ async function choosePreset(existing: ContinuityPreset | undefined, outputMode: 
   return selectMenu<ContinuityPreset>('Step 3/3 · Fidelity', [
     { value: 'compact', label: `${paint('green', 'compact')}`, detail: fileMode ? 'small file, still has summaries' : 'short paste, fastest' },
     { value: 'standard', label: `${paint('cyan', 'standard')} ${paint('green', 'recommended')}`, detail: fileMode ? 'larger handoff, balanced' : 'paste-sized, balanced' },
+    { value: 'extended', label: `${paint('blue', 'extended')}`, detail: fileMode ? 'more history, no raw tool results' : 'larger paste, more decisions' },
     { value: 'full', label: `${paint('yellow', 'full')}`, detail: fileMode ? 'max context, big file' : 'large paste, high fidelity' },
   ], 1);
 }
 
 function printSessionList(sessions: ContinuitySession[], opts: ParsedArgs, searchAll: boolean): void {
   const scope = searchAll ? 'all projects' : `current dir: ${process.cwd()}`;
+  const order = opts.reverse ? 'oldest first' : 'newest first';
   const output = resolveOutput(opts);
   console.log(box('BrainKeeper Continuity', [
     `${paint('cyan', 'continuity')} sits between native resume and distill.`,
     `scope ${paint('bold', scope)}`,
-    `output ${outputText(output)}  preset ${presetText(opts.preset)}  limit ${opts.limit ?? DEFAULT_LIMIT}`,
+    `output ${outputText(output)}  preset ${presetText(opts.preset)}  limit ${opts.limit ?? DEFAULT_LIMIT}  order ${paint('bold', order)}`,
   ]));
   console.log('');
   console.log([
@@ -1501,7 +1640,7 @@ function printSessionList(sessions: ContinuitySession[], opts: ParsedArgs, searc
     padVisible('project', 18),
     padVisible('hash', 8),
     padVisible('origin', 8),
-    'signal',
+    'latest prompt / signal',
   ].join('  '));
   console.log(paint('gray', '─'.repeat(Math.min(terminalWidth(), 132))));
   sessions.forEach((session, index) => console.log(formatSessionRow(session, index + 1)));
@@ -1532,13 +1671,15 @@ ${paint('bold', 'Scope')}
   --all --list                      list all discoverable projects
   --limit <n>                       list/search limit, default ${DEFAULT_LIMIT}
   --refresh                         rebuild session cache before listing
+  --reverse                         reverse displayed rows (older first within limit)
   --no-cache                        bypass cache for this run
 
 ${paint('bold', 'Output')}
   --output clipboard|file           clipboard=paste-sized, file=larger handoff file
   --clipboard / --paste             alias: --output clipboard
   --file                            alias: --output file --no-copy
-  --preset compact|standard|full    compact=short, standard=default, full=high fidelity
+  --preset compact|standard|extended|full
+                                    extended=more history without raw tool results
   --print                           print generated Markdown
   --no-copy                         do not copy to clipboard
   --no-git                          omit Git State
@@ -1589,6 +1730,7 @@ export async function cmdContinuity(argv: string[]): Promise<void> {
     cwd: process.cwd(),
     limit: discoveryLimit,
     all: searchAll,
+    reverse: opts.reverse,
     refresh: opts.refresh,
     cache: opts.cache,
   });
@@ -1613,6 +1755,7 @@ export async function cmdContinuity(argv: string[]): Promise<void> {
       cwd: process.cwd(),
       limit: Number.MAX_SAFE_INTEGER,
       all: true,
+      reverse: opts.reverse,
       refresh: true,
       cache: true,
     });

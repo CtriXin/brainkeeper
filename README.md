@@ -197,6 +197,62 @@ cd ~/.local/share/brainkeeper && pnpm install
 - 需要归档时：调用 `brain_sync_issue(repo, thread?)`
 - 当前实现是显式同步，不会每写一条 fragment 就自动刷 `issue.md`
 
+### Continuity — 跨 CLI 续聊
+
+`bk c` / `bk continue` 生成 **Continuity Restore Card**：把 Claude / Codex /
+MMS slot 里的最近会话压成一张可启动的 Markdown handoff，用来在另一个 CLI
+里“变相 resume”。它不是 raw transcript 备份，默认更像启动卡：先给 mission、
+snapshot、hard blocks、关键对话信号、重要工具动作和下一步。
+
+```bash
+bk c                         # 交互选择 session / output / fidelity
+bk c --list                  # 列出当前项目可续聊 session
+bk c codex:<hash>            # 指定 Codex session hash
+bk c claude:<session-id>     # 指定 Claude session id
+bk c --output clipboard      # 粘贴友好，压缩更激进
+bk c --output file           # 写入 .ai/continuity/*.md，预算更宽
+bk c --preset compact        # 最短
+bk c --preset standard       # 默认
+bk c --preset extended       # 比 standard 多历史，比 full 更可控
+bk c --preset full           # 尽量完整，包含更多工具细节
+bk c --reverse               # 列表倒序显示当前 limit 内 session
+```
+
+#### Preset 怎么选？
+
+| Preset | 适合场景 |
+|--------|----------|
+| `compact` | 快速接手，短粘贴，保留最关键启动信息 |
+| `standard` | 默认选择，适合大多数跨 CLI 续聊 |
+| `extended` | 长 session 中档：比 `standard` 多上下文，但不塞 raw tool results |
+| `full` | 深度 debug / 审计，需要更多工具细节和长消息 |
+
+#### Restore Card 是怎么压缩的？
+
+当前 `compact / standard / extended / full` **不调用模型**，而是规则压缩 +
+预算裁剪：
+
+```text
+raw transcript -> parser -> structured context -> budget trimming -> restore card
+```
+
+- 从 Codex / Claude jsonl 中解析 `role/content/tool/files`
+- 连续重复 message 去重
+- 列表右侧优先显示最近一条 user signal，便于判断 session 最后进度
+- 按 preset 限制 key conversation signals、tool activity、单条 message 字符数、tool result 字符数
+- 默认裁掉 `rg --files` 等噪音工具输出，只保留状态变化、验证、commit、handoff、写文件等重要动作
+- `clipboard` profile 比 `file` profile 更激进，避免粘贴过长
+- `file` profile 预算更大，适合让下个 agent 直接读 `.ai/continuity/*.md`
+- git state 标为 snapshot；live `git status --short` 永远是 source of truth
+- 自动发现 repo 内 `.ai/design-assets/**/README.md`，在 `Design Assets` 中作为图片资产 source of truth
+- `generated_images` 只标为 unclassified fallback，不从 transcript 猜最终图
+
+这样做的优点是快、稳定、离线、不花 token、不会编造；缺点是不会语义理解哪
+些旧上下文最重要，长工具输出也只是截断而不是智能总结。
+
+后续可以加可选 smart 模式，例如 `bk c --smart`：保留最近几轮原文，同时用模型
+总结更老的上下文和工具噪音。默认 `bk c` 会继续保持规则压缩。
+
 ### Board — 项目看板
 
 | 工具 | 用途 |
